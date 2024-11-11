@@ -9,6 +9,7 @@ import pyfisher
 from enlib import bench
 import solenspipe
 from mpi4py import MPI
+import matplotlib.pyplot as plt
 comm = MPI.COMM_WORLD
 
 # ARGPARSE
@@ -31,8 +32,10 @@ parser.add_argument("--mask", type=str, help="Path to mask .fits file, should be
 parser.add_argument("--apodize", type=float, help='Apodize the mask with input width in degrees. Only applies if a mask is passed in.')
 parser.add_argument("--no-save", action='store_true',help='Dont save outputs other than plots.')
 parser.add_argument("--add-white-noise", action='store_true',help='Whether to add white noise to data and sim maps.')
-parser.add_argument("--add-noise-map",action="store_true",help="Whether to add a noise realization to data and sim maps")
-parser.add_argument("--noise-map-path",type=str,default=None,help="Noise realization to add to the maps. Should include a path.")
+parser.add_argument("--add-noise-model",action='store_true',help="Whether to add a noise simulation to the sims.")
+parser.add_argument("--noise-model-path",type=str,help="Noise model to add to the simulations. Should include a path.")
+parser.add_argument("--add-noise-map",action="store_true",help="Whether to add a noise realization to mock data")
+parser.add_argument("--noise-map-path",type=str,default=None,help="Noise realization to add to the mock data. Should include a path.")
 parser.add_argument("--map-plots", action='store_true',help='Whether to plot data maps.')
 parser.add_argument("--downgrade", type=float,default=None,help='Downgrade map/mask to specified resolution.')
 required_args = parser.add_argument_group('Required arguments')
@@ -44,7 +47,7 @@ save_map_plots = args.map_plots
 
 # Specify instrument
 fwhm_arcmin = 2.2
-noise_uk = 10.0  #only matters if add_white_noise=True
+noise_uk = 5.8  ## ignored if add-noise-model True  
 dec_min = args.decmin
 dec_max = args.decmax
 if args.downgrade is None:
@@ -52,6 +55,8 @@ if args.downgrade is None:
 else:
     res = args.downgrade
 add_white_noise = args.add_white_noise
+add_noise_model = args.add_noise_model
+noise_model_path = args.noise_model_path
 add_noise_map = args.add_noise_map
 noise_map_path = args.noise_map_path
 
@@ -82,15 +87,65 @@ else:
     mask = args.mask
 
 mg = solenspipe.LensingSandbox(fwhm_arcmin,noise_uk,dec_min,dec_max,res,
-                               lmin,lmax,mlmax,ests,add_white_noise=add_white_noise,
+                               lmin,lmax,mlmax,ests,
+                               add_white_noise=add_white_noise,
+                               add_noise_model=add_noise_model,
+                               noise_model_path=noise_model_path,
                                add_noise_map = add_noise_map,noise_map_path = noise_map_path,
                                mask=mask,verbose=True)
 #print(mg.shape)
-data_map = mg.get_observed_map(0)  #take signal sim, convolve with beam and add noise
+print("adding white noise??")
+print(mg.add_white_noise)
+
+data_map = mg.get_observed_map_with_noise_map(0)  #take signal sim, convolve with beam and add noise map !!!!
+Xdata = mg.prepare(data_map) #transform map to alms, apply isotropic filter
+sim_map = mg.get_observed_map(index=1,iset=0,n_index=1)
+Xsim = mg.prepare(sim_map)
+
+data_alm = cs.map2alm(data_map,lmax=4000)
+data_cls = cs.alm2cl(data_alm)
+sim_alm = cs.map2alm(sim_map,lmax=4000)
+sim_cls = cs.alm2cl(sim_alm)
+ls = np.arange(len(data_cls[0]))
+
+Xdatacls = cs.alm2cl(Xdata)
+Xsimcls = cs.alm2cl(Xsim)
+ells = np.arange(len(Xdatacls[0]))
+dfact = ls*(ls+1)/(2*np.pi)
+dfact2 = ells*(ells+1)/(2*np.pi)
+
+fig = plt.figure()
+plt.loglog(ls,dfact*data_cls[0],label="mock data")
+plt.loglog(ls,dfact*sim_cls[0],label="sim")
+plt.loglog(ells,dfact2*Xdatacls[0],label="mock data (filtered)")
+plt.legend(ells,dfact2*Xsimcls[0],label="sim (filtered)")
+plt.savefig(f"{outname}tt_comp.png")
+plt.close(fig)
+
+
+fig = plt.figure()
+plt.plot(ls, dfact*data_cls[1],label="mock data")
+plt.plot(ls,dfact*sim_cls[1],label="sim")
+plt.loglog(ells,dfact2*Xdatacls[1],label="mock data (filtered)")
+plt.legend(ells,dfact2*Xsimcls[1],label="sim (filtered)")
+plt.legend()
+plt.savefig(f"{outname}te_comp.png")
+plt.close(fig)
+
+fig = plt.figure()
+plt.plot(ls, dfact*data_cls[2],label="mock data")
+plt.plot(ls, dfact*sim_cls[2],label="sim")
+plt.loglog(ells,dfact2*Xdatacls[2],label="mock data (filtered)")
+plt.legend(ells,dfact2*Xsimcls[2],label="sim (filtered)")
+#plt.xscale("log")
+plt.legend()
+plt.savefig(f"{outname}ee_comp.png")
+plt.close(fig)
+
 #data_map_d8 = enmap.downgrade(data_map,8)
 #enplot.write("sandbox_data",enplot.plot(data_map_d8))
-Xdata = mg.prepare(data_map) #transform map to alms, apply isotropic filter
 
+"""
 galm,calm = mg.qfuncs[est](Xdata,Xdata)
 if save_map_plots:
     io.hplot(data_map,f'{outname}_data_map',downgrade=4)
@@ -159,10 +214,6 @@ if comm.Get_rank()==0:
     cents,bmcn1 = binner.bin(ls,mcn1)
     bclkk_final = bclkk_xx-brdn0-bmcn1 # Final debiased power spectrum
 
-    if not(args.no_save): io.save_cols(f"{outname}_output_clkk.txt",
-                                       (ls,clkk_ii,clkk_xx,clkk_ix,rdn0,
-                                        mcn1,mcmf,clkk_xx-rdn0-mcn1))
-
     # Plot relative difference from input
     for xscale in ['log','lin']:
         pl = io.Plotter('rCL',xyscale=f'{xscale}lin')
@@ -194,5 +245,9 @@ if comm.Get_rank()==0:
         pl._ax.set_xlim(2,Lmax)
         pl.legend('outside')
         pl.done(f'{outname}_clkk_ix_{xscale}.png')
-
-
+        
+    if not(args.no_save): io.save_cols(f"{outname}_output_clkk.txt",
+                                    (ls,clkk_ii,clkk_xx,clkk_ix,rdn0,
+                                    mcn1,mcmf,clkk_xx-rdn0-mcn1))
+                                    
+"""
